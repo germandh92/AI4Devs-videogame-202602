@@ -1,0 +1,516 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Space Shooter</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+
+    body {
+      background: #000;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      height: 100vh;
+      font-family: 'Courier New', monospace;
+      overflow: hidden;
+    }
+
+    #hud {
+      display: flex;
+      justify-content: space-between;
+      width: 480px;
+      padding: 6px 4px;
+      color: #0ff;
+      font-size: 14px;
+      letter-spacing: 1px;
+      text-transform: uppercase;
+    }
+
+    #hud span { min-width: 120px; }
+    #hud span:last-child { text-align: right; }
+
+    canvas {
+      display: block;
+      border: 1px solid #0ff3;
+      background: #000;
+    }
+
+    #overlay {
+      position: absolute;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      gap: 16px;
+      color: #fff;
+      text-align: center;
+      pointer-events: none;
+    }
+
+    #overlay h1 {
+      font-size: 42px;
+      letter-spacing: 4px;
+      text-transform: uppercase;
+    }
+
+    #overlay p  { font-size: 15px; color: #aaa; letter-spacing: 1px; }
+    #overlay .big { font-size: 22px; color: #0ff; }
+
+    #overlay button {
+      pointer-events: all;
+      margin-top: 8px;
+      padding: 12px 36px;
+      font-size: 16px;
+      font-family: 'Courier New', monospace;
+      background: transparent;
+      color: #0ff;
+      border: 2px solid #0ff;
+      cursor: pointer;
+      letter-spacing: 2px;
+      text-transform: uppercase;
+      transition: background 0.2s, color 0.2s;
+    }
+
+    #overlay button:hover { background: #0ff; color: #000; }
+
+    .hidden { display: none !important; }
+
+    #lives-icons { letter-spacing: 4px; }
+  </style>
+</head>
+<body>
+
+<div id="hud">
+  <span>Puntos: <span id="score-val">0</span></span>
+  <span style="text-align:center">Nivel: <span id="level-val">1</span></span>
+  <span id="lives-icons">&#9650;&#9650;&#9650;</span>
+</div>
+
+<canvas id="canvas" width="480" height="600"></canvas>
+
+<div id="overlay">
+  <h1 id="ov-title">Space Shooter</h1>
+  <p id="ov-sub">Defiende la galaxia</p>
+  <p class="big" id="ov-extra"></p>
+  <button id="ov-btn">Iniciar</button>
+</div>
+
+<script>
+/* ─── constantes ─────────────────────────────────────── */
+const W = 480, H = 600;
+const canvas = document.getElementById('canvas');
+const ctx    = canvas.getContext('2d');
+
+const PLAYER_W  = 36, PLAYER_H = 28;
+const BULLET_W  = 4,  BULLET_H = 12;
+const ENEMY_W   = 32, ENEMY_H  = 24;
+const ENEMY_COLS = 10, ENEMY_ROWS = 4;
+const ENEMY_PAD_X = 44, ENEMY_PAD_Y = 36, ENEMY_TOP = 60;
+
+/* ─── estado global ──────────────────────────────────── */
+let state = 'menu';   // menu | playing | paused | levelup | gameover | win
+let score = 0, lives = 3, level = 1;
+let animId;
+
+/* ─── entidades ──────────────────────────────────────── */
+let player, bullets, enemyBullets, enemies, particles, stars;
+let enemyDir, enemySpeed, enemyDropAmt, enemyShootTimer, enemyShootInterval;
+let shieldFlash = 0;   // frames de flash al recibir daño
+
+/* ─── teclado ────────────────────────────────────────── */
+const keys = {};
+document.addEventListener('keydown', e => {
+  keys[e.code] = true;
+  if (e.code === 'Space') e.preventDefault();
+});
+document.addEventListener('keyup',  e => { keys[e.code] = false; });
+
+/* ─── HUD ────────────────────────────────────────────── */
+const scoreVal  = document.getElementById('score-val');
+const levelVal  = document.getElementById('level-val');
+const livesIcons= document.getElementById('lives-icons');
+function updateHUD() {
+  scoreVal.textContent  = score;
+  levelVal.textContent  = level;
+  livesIcons.innerHTML  = '&#9650;'.repeat(Math.max(0, lives));
+}
+
+/* ─── overlay ────────────────────────────────────────── */
+const overlay  = document.getElementById('overlay');
+const ovTitle  = document.getElementById('ov-title');
+const ovSub    = document.getElementById('ov-sub');
+const ovExtra  = document.getElementById('ov-extra');
+const ovBtn    = document.getElementById('ov-btn');
+
+ovBtn.addEventListener('click', () => {
+  if (state === 'menu' || state === 'gameover') startGame();
+  else if (state === 'levelup') startLevel();
+  else if (state === 'win')     { level = 1; score = 0; startGame(); }
+});
+
+function showOverlay(title, sub, extra, btn) {
+  overlay.classList.remove('hidden');
+  ovTitle.textContent = title;
+  ovSub.textContent   = sub;
+  ovExtra.textContent = extra;
+  ovBtn.textContent   = btn;
+}
+function hideOverlay() { overlay.classList.add('hidden'); }
+
+/* ─── estrellas de fondo ─────────────────────────────── */
+function initStars() {
+  stars = Array.from({length: 120}, () => ({
+    x: Math.random() * W,
+    y: Math.random() * H,
+    r: Math.random() * 1.4 + 0.3,
+    spd: Math.random() * 0.6 + 0.2,
+    a: Math.random() * 0.7 + 0.3
+  }));
+}
+
+function updateStars() {
+  stars.forEach(s => {
+    s.y += s.spd;
+    if (s.y > H) { s.y = 0; s.x = Math.random() * W; }
+  });
+}
+
+function drawStars() {
+  stars.forEach(s => {
+    ctx.globalAlpha = s.a;
+    ctx.fillStyle = '#fff';
+    ctx.beginPath();
+    ctx.arc(s.x, s.y, s.r, 0, Math.PI * 2);
+    ctx.fill();
+  });
+  ctx.globalAlpha = 1;
+}
+
+/* ─── dibujar nave del jugador ───────────────────────── */
+function drawPlayer() {
+  const { x, y } = player;
+  const flash = shieldFlash > 0 && Math.floor(shieldFlash / 3) % 2 === 0;
+  if (flash) { shieldFlash--; }
+
+  ctx.save();
+  ctx.translate(x, y);
+
+  // cuerpo principal
+  ctx.fillStyle = flash ? '#f88' : '#0cf';
+  ctx.beginPath();
+  ctx.moveTo(0, -PLAYER_H / 2);
+  ctx.lineTo(PLAYER_W / 2, PLAYER_H / 2);
+  ctx.lineTo(-PLAYER_W / 2, PLAYER_H / 2);
+  ctx.closePath();
+  ctx.fill();
+
+  // cabina
+  ctx.fillStyle = flash ? '#faa' : '#08f';
+  ctx.beginPath();
+  ctx.ellipse(0, 2, 7, 9, 0, 0, Math.PI * 2);
+  ctx.fill();
+
+  // alas
+  ctx.fillStyle = flash ? '#f66' : '#09c';
+  ctx.beginPath();
+  ctx.moveTo(-PLAYER_W / 2, PLAYER_H / 2);
+  ctx.lineTo(-PLAYER_W / 2 - 10, PLAYER_H / 2 + 4);
+  ctx.lineTo(-PLAYER_W / 4, PLAYER_H / 4);
+  ctx.closePath();
+  ctx.fill();
+
+  ctx.beginPath();
+  ctx.moveTo(PLAYER_W / 2, PLAYER_H / 2);
+  ctx.lineTo(PLAYER_W / 2 + 10, PLAYER_H / 2 + 4);
+  ctx.lineTo(PLAYER_W / 4, PLAYER_H / 4);
+  ctx.closePath();
+  ctx.fill();
+
+  // propulsores
+  ctx.fillStyle = `rgba(255,${120 + Math.random()*80},0,0.9)`;
+  ctx.beginPath();
+  ctx.ellipse(-9, PLAYER_H / 2 + 2, 4, 6 + Math.random()*3, 0, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.beginPath();
+  ctx.ellipse(9, PLAYER_H / 2 + 2, 4, 6 + Math.random()*3, 0, 0, Math.PI * 2);
+  ctx.fill();
+
+  ctx.restore();
+}
+
+/* ─── dibujar enemigo ────────────────────────────────── */
+function drawEnemy(e) {
+  ctx.save();
+  ctx.translate(e.x, e.y);
+
+  // cuerpo
+  ctx.fillStyle = e.color;
+  ctx.beginPath();
+  ctx.moveTo(0, ENEMY_H / 2);
+  ctx.lineTo(ENEMY_W / 2, -ENEMY_H / 2);
+  ctx.lineTo(-ENEMY_W / 2, -ENEMY_H / 2);
+  ctx.closePath();
+  ctx.fill();
+
+  // antenas
+  ctx.strokeStyle = e.color;
+  ctx.lineWidth = 2;
+  ctx.beginPath(); ctx.moveTo(-8, -ENEMY_H / 2); ctx.lineTo(-12, -ENEMY_H / 2 - 8); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo( 8, -ENEMY_H / 2); ctx.lineTo( 12, -ENEMY_H / 2 - 8); ctx.stroke();
+
+  // ojos
+  ctx.fillStyle = '#000';
+  ctx.beginPath(); ctx.arc(-7, -4, 4, 0, Math.PI * 2); ctx.fill();
+  ctx.beginPath(); ctx.arc( 7, -4, 4, 0, Math.PI * 2); ctx.fill();
+  ctx.fillStyle = '#fff';
+  ctx.beginPath(); ctx.arc(-6, -5, 1.5, 0, Math.PI * 2); ctx.fill();
+  ctx.beginPath(); ctx.arc( 8, -5, 1.5, 0, Math.PI * 2); ctx.fill();
+
+  ctx.restore();
+}
+
+/* ─── partículas de explosión ────────────────────────── */
+function spawnExplosion(x, y, color, count = 20) {
+  for (let i = 0; i < count; i++) {
+    const angle = Math.random() * Math.PI * 2;
+    const spd   = Math.random() * 3 + 1;
+    particles.push({
+      x, y,
+      vx: Math.cos(angle) * spd,
+      vy: Math.sin(angle) * spd,
+      r : Math.random() * 4 + 1,
+      life: 1,
+      decay: Math.random() * 0.03 + 0.02,
+      color
+    });
+  }
+}
+
+function updateParticles() {
+  for (let i = particles.length - 1; i >= 0; i--) {
+    const p = particles[i];
+    p.x += p.vx; p.y += p.vy;
+    p.vy += 0.05;
+    p.life -= p.decay;
+    if (p.life <= 0) particles.splice(i, 1);
+  }
+}
+
+function drawParticles() {
+  particles.forEach(p => {
+    ctx.globalAlpha = p.life;
+    ctx.fillStyle   = p.color;
+    ctx.beginPath();
+    ctx.arc(p.x, p.y, p.r, 0, Math.PI * 2);
+    ctx.fill();
+  });
+  ctx.globalAlpha = 1;
+}
+
+/* ─── inicializar nivel ──────────────────────────────── */
+function initLevel() {
+  bullets       = [];
+  enemyBullets  = [];
+  particles     = [];
+
+  // velocidad y disparo escalan con el nivel
+  enemySpeed         = 0.8 + level * 0.35;
+  enemyDropAmt       = 10 + level * 2;
+  enemyDir           = 1;
+  enemyShootTimer    = 0;
+  enemyShootInterval = Math.max(40, 100 - level * 10);
+
+  const colors = ['#f44', '#f84', '#ff0', '#4f4', '#48f', '#f4f'];
+
+  enemies = [];
+  for (let row = 0; row < ENEMY_ROWS; row++) {
+    for (let col = 0; col < ENEMY_COLS; col++) {
+      enemies.push({
+        x    : ENEMY_PAD_X + col * ((W - ENEMY_PAD_X * 2) / (ENEMY_COLS - 1)),
+        y    : ENEMY_TOP + row * ENEMY_PAD_Y,
+        alive: true,
+        color: colors[row % colors.length],
+        points: (ENEMY_ROWS - row) * 10
+      });
+    }
+  }
+
+  player = {
+    x: W / 2, y: H - 50,
+    spd: 5,
+    shootCooldown: 0
+  };
+}
+
+/* ─── iniciar partida ────────────────────────────────── */
+function startGame() {
+  score = 0; lives = 3; level = 1;
+  initStars();
+  initLevel();
+  updateHUD();
+  hideOverlay();
+  state = 'playing';
+  if (animId) cancelAnimationFrame(animId);
+  loop();
+}
+
+function startLevel() {
+  initLevel();
+  updateHUD();
+  hideOverlay();
+  state = 'playing';
+}
+
+/* ─── lógica de juego ────────────────────────────────── */
+function updateGame() {
+  updateStars();
+  updateParticles();
+  if (shieldFlash > 0) shieldFlash--;
+
+  // jugador
+  const spd = player.spd;
+  if (keys['ArrowLeft']  || keys['KeyA']) player.x = Math.max(PLAYER_W / 2, player.x - spd);
+  if (keys['ArrowRight'] || keys['KeyD']) player.x = Math.min(W - PLAYER_W / 2, player.x + spd);
+
+  if (player.shootCooldown > 0) player.shootCooldown--;
+  if ((keys['Space'] || keys['ArrowUp'] || keys['KeyW']) && player.shootCooldown === 0) {
+    bullets.push({ x: player.x, y: player.y - PLAYER_H / 2 });
+    player.shootCooldown = 18;
+  }
+
+  // balas del jugador
+  for (let i = bullets.length - 1; i >= 0; i--) {
+    bullets[i].y -= 9;
+    if (bullets[i].y < -BULLET_H) { bullets.splice(i, 1); continue; }
+
+    // colisión con enemigos
+    for (let j = enemies.length - 1; j >= 0; j--) {
+      const e = enemies[j];
+      if (!e.alive) continue;
+      if (Math.abs(bullets[i].x - e.x) < ENEMY_W / 2 &&
+          Math.abs(bullets[i].y - e.y) < ENEMY_H / 2) {
+        spawnExplosion(e.x, e.y, e.color);
+        score += e.points;
+        e.alive = false;
+        bullets.splice(i, 1);
+        updateHUD();
+        break;
+      }
+    }
+  }
+
+  // movimiento enemigos
+  const alive = enemies.filter(e => e.alive);
+  if (alive.length === 0) {
+    // nivel completado
+    level++;
+    if (level > 5) {
+      state = 'win';
+      showOverlay('¡Victoria!', '¡Has defendido la galaxia!', `Puntuación final: ${score}`, 'Reiniciar');
+      return;
+    }
+    state = 'levelup';
+    showOverlay(`Nivel ${level}`, 'Los enemigos son más rápidos', `Puntuación: ${score}`, 'Continuar');
+    return;
+  }
+
+  const leftmost  = Math.min(...alive.map(e => e.x));
+  const rightmost = Math.max(...alive.map(e => e.x));
+  const lowest    = Math.max(...alive.map(e => e.y));
+
+  // revertir dirección al llegar al borde
+  if ((enemyDir === 1 && rightmost + ENEMY_W / 2 >= W - 10) ||
+      (enemyDir === -1 && leftmost  - ENEMY_W / 2 <= 10)) {
+    alive.forEach(e => e.y += enemyDropAmt);
+    enemyDir *= -1;
+  }
+
+  alive.forEach(e => e.x += enemyDir * enemySpeed);
+
+  // game over si llegan abajo
+  if (lowest + ENEMY_H / 2 >= player.y - PLAYER_H / 2) {
+    endGame();
+    return;
+  }
+
+  // disparo enemigo
+  enemyShootTimer++;
+  if (enemyShootTimer >= enemyShootInterval) {
+    enemyShootTimer = 0;
+    const shooter = alive[Math.floor(Math.random() * alive.length)];
+    enemyBullets.push({ x: shooter.x, y: shooter.y + ENEMY_H / 2 });
+  }
+
+  // balas enemigas
+  for (let i = enemyBullets.length - 1; i >= 0; i--) {
+    enemyBullets[i].y += 5 + level * 0.4;
+    if (enemyBullets[i].y > H + BULLET_H) { enemyBullets.splice(i, 1); continue; }
+
+    const eb = enemyBullets[i];
+    if (Math.abs(eb.x - player.x) < PLAYER_W / 2 &&
+        Math.abs(eb.y - player.y) < PLAYER_H / 2) {
+      enemyBullets.splice(i, 1);
+      lives--;
+      shieldFlash = 30;
+      spawnExplosion(player.x, player.y, '#0cf', 12);
+      updateHUD();
+      if (lives <= 0) { endGame(); return; }
+    }
+  }
+}
+
+function endGame() {
+  state = 'gameover';
+  spawnExplosion(player.x, player.y, '#0cf', 40);
+  showOverlay('Game Over', `Llegaste al nivel ${level}`, `Puntuación: ${score}`, 'Reintentar');
+}
+
+/* ─── renderizado ─────────────────────────────────────── */
+function draw() {
+  ctx.clearRect(0, 0, W, H);
+  drawStars();
+
+  if (state === 'playing' || state === 'levelup' || state === 'gameover' || state === 'win') {
+    // balas jugador
+    ctx.fillStyle = '#ff0';
+    bullets.forEach(b => {
+      ctx.fillRect(b.x - BULLET_W / 2, b.y - BULLET_H, BULLET_W, BULLET_H);
+    });
+
+    // balas enemigas
+    ctx.fillStyle = '#f44';
+    enemyBullets.forEach(b => {
+      ctx.fillRect(b.x - BULLET_W / 2, b.y, BULLET_W, BULLET_H);
+    });
+
+    // enemigos
+    enemies.filter(e => e.alive).forEach(drawEnemy);
+
+    // jugador (no dibujar si game over)
+    if (state === 'playing') drawPlayer();
+
+    drawParticles();
+  }
+}
+
+/* ─── bucle principal ─────────────────────────────────── */
+function loop() {
+  if (state === 'playing') updateGame();
+  else if (state !== 'menu') {
+    updateStars();
+    updateParticles();
+  }
+  draw();
+  animId = requestAnimationFrame(loop);
+}
+
+/* ─── arranque ────────────────────────────────────────── */
+initStars();
+showOverlay('Space Shooter', 'Defiende la galaxia durante 5 niveles', '', 'Iniciar');
+loop();
+</script>
+</body>
+</html>
